@@ -3,227 +3,212 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>龍珠雷達 - 走動定位真實方位版</title>
+  <title>龍珠雷達 DRAGON RADAR</title>
   <style>
-    body {
-      background-color: #041206;
-      color: #33ff33;
-      font-family: 'Segoe UI', monospace;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      margin: 0;
-    }
-    h1 {
-      margin: 0 0 5px 0;
-      text-shadow: 0 0 10px #228b22;
-    }
-    .status-box {
-      font-size: 14px;
-      margin-bottom: 10px;
-      color: #88ff88;
-      text-align: center;
-    }
-    .guide-box {
-      background: #194d1c;
-      color: #ffff88;
-      padding: 8px 15px;
-      border-radius: 5px;
-      font-size: 13px;
-      margin-bottom: 10px;
-      display: none;
-    }
-    #radarCanvas {
-      background-color: #07220a;
-      border: 4px solid #33cc33;
-      border-radius: 50%;
-      box-shadow: 0 0 25px rgba(51, 204, 51, 0.4);
-    }
-    .info-card {
-      background: rgba(7, 34, 10, 0.8);
-      border: 1px solid #33cc33;
-      border-radius: 8px;
-      padding: 10px 20px;
-      margin-top: 15px;
-      text-align: center;
-    }
-    .btn-group {
-      margin-top: 15px;
-      display: flex;
-      gap: 10px;
-    }
-    button {
-      padding: 10px 16px;
-      font-size: 14px;
-      font-weight: bold;
-      background: #0d3810;
-      color: #33ff33;
-      border: 1px solid #33cc33;
-      border-radius: 6px;
-      cursor: pointer;
-    }
-    button:hover { background: #19591c; }
+    body { background: #111; color: #fff; font-family: sans-serif; text-align: center; margin: 0; padding: 15px; }
+    .panel { background: rgba(255,255,255,0.08); padding: 15px; border-radius: 10px; margin-bottom: 15px; display: inline-block; text-align: left; width: 90%; max-width: 360px; box-sizing: border-box; }
+    input { width: 100%; padding: 8px; margin: 5px 0 10px 0; border-radius: 5px; border: 1px solid #444; background: #222; color: #fff; box-sizing: border-box; }
+    button { width: 100%; background: #f39c12; border: none; color: white; padding: 10px; border-radius: 5px; font-weight: bold; cursor: pointer; margin: 4px 0; font-size: 15px; }
+    button.blue { background: #2980b9; }
+    #status { color: #2ecc71; font-size: 13px; margin-top: 10px; white-space: pre-line; line-height: 1.4; }
+    #radarCanvas { background: #000; border: 4px solid #f39c12; border-radius: 50%; display: block; margin: 10px auto; }
   </style>
 </head>
 <body>
 
-  <h1>DRAGON RADAR</h1>
-  <div class="status-box" id="statusText">狀態：未連線</div>
-  <div class="guide-box" id="guideText">校正中：請拿手機向前走動 2~3 步...</div>
+  <h2>🐉 龍珠雷達 (全功能整合版)</h2>
 
-  <canvas id="radarCanvas" width="320" height="320"></canvas>
-
-  <div class="info-card">
-    <div>預估距離: <span id="distVal">--</span> 公分</div>
-    <div>目標絕對方位: <span id="bearingVal">未校正</span></div>
+  <div class="panel">
+    <label>1. 目標經緯度：</label>
+    <input type="number" id="targetLat" step="any" placeholder="緯度 (Lat) 例如: 22.650123">
+    <input type="number" id="targetLng" step="any" placeholder="經度 (Lng) 例如: 120.312456">
+    
+    <button class="blue" onclick="connectBluetooth()">1. 連線藍芽龍珠 (BLE)</button>
+    <button onclick="startGPSTracking()">2. 啟動 GPS 與指南針追蹤</button>
+    <button onclick="triggerSearchSound()">3. 手動發出逼逼聲 🔊</button>
+    
+    <div id="status">狀態：等待操作...</div>
   </div>
 
-  <div class="btn-group">
-    <button id="startBtn">連線並啟動雷達</button>
-    <button id="recalBtn" style="display:none;">重新校正方位</button>
-  </div>
+  <canvas id="radarCanvas" width="300" height="300"></canvas>
 
-<script>
-  const canvas = document.getElementById('radarCanvas');
-  const ctx = canvas.getContext('2d');
-  const centerX = canvas.width / 2;
-  const centerY = canvas.height / 2;
-  const maxRadius = canvas.width / 2 - 12;
+  <script>
+    let userLat = 0, userLng = 0, userHeading = 0;
+    let bleDevice, bleServer;
+    let currentRSSI = -100;
+    let autoBeepInterval = null;
 
-  let isConnected = false;
-  let isCalibrated = false;
+    // --- 音效系統 (利用 Web Audio API 合成) ---
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
-  // 定位相關變數
-  let phoneHeading = 0;              // 手機當前指南針朝向 (0~360)
-  let targetAbsoluteBearing = 0;      // 推算出的龍珠絕對方位 (0~360)
-  let currentDistanceCm = 200;       // 目前距離 (cm)
-  let initialDistanceCm = 0;         // 起始點距離
-  let startHeading = 0;              // 開始走動時的手機方向
-
-  // 1. 畫布繪製
-  function drawRadar() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    // 背景網格同心圓
-    ctx.strokeStyle = '#1e6622';
-    ctx.lineWidth = 1.5;
-    for (let r = 1; r <= 3; r++) {
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, (maxRadius / 3) * r, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-    ctx.beginPath();
-    ctx.moveTo(centerX, 10); ctx.lineTo(centerX, canvas.height - 10);
-    ctx.moveTo(10, centerY); ctx.lineTo(canvas.width - 10, centerY);
-    ctx.stroke();
-
-    // 繪製龍珠光點
-    if (isConnected) {
-      let relativeAngleDegree = targetAbsoluteBearing - phoneHeading;
-      let relativeAngleRad = (relativeAngleDegree - 90) * (Math.PI / 180);
-
-      // 距離換算為雷達半徑比例 (上限 5 公尺 = 最外圈)
-      let distRatio = Math.min(1, Math.max(0.1, currentDistanceCm / 500));
-      let dotRadius = distRatio * maxRadius;
-
-      let dotX = centerX + dotRadius * Math.cos(relativeAngleRad);
-      let dotY = centerY + dotRadius * Math.sin(relativeAngleRad);
-
-      ctx.beginPath();
-      ctx.arc(dotX, dotY, 8, 0, Math.PI * 2);
-      ctx.fillStyle = isCalibrated ? '#ffcc00' : '#888888'; // 校正完成為黃色，校正中為灰色
-      ctx.shadowBlur = isCalibrated ? 15 : 0;
-      ctx.shadowColor = '#ffff00';
-      ctx.fill();
-      ctx.shadowBlur = 0;
-    }
-
-    requestAnimationFrame(drawRadar);
-  }
-
-  // 2. 手機指南針與感測器
-  function handleOrientation(event) {
-    if (event.webkitCompassHeading !== undefined) {
-      phoneHeading = event.webkitCompassHeading; // iOS
-    } else if (event.alpha !== null) {
-      phoneHeading = 360 - event.alpha; // Android
-    }
-  }
-
-  // 3. 走動校正邏輯 (三點位移推算)
-  function startCalibration() {
-    isCalibrated = false;
-    initialDistanceCm = currentDistanceCm;
-    startHeading = phoneHeading;
-
-    document.getElementById('guideText').style.display = 'block';
-    document.getElementById('guideText').innerText = '【方位校正】請拿起手機往前直走 3 步...';
-
-    // 監聽 3 秒後的距離變化
-    setTimeout(() => {
-      let distanceChange = currentDistanceCm - initialDistanceCm;
+    function playBeepSound() {
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = 880; // 高音 880Hz
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
       
-      // 若走動後距離變小 -> 代表龍珠在移動方向的前方區塊
-      // 若走動後距離變大 -> 代表龍珠在移動方向的後方區塊
-      if (distanceChange < -15) {
-        // 近了：目標大概在直走的方向
-        targetAbsoluteBearing = startHeading;
-      } else if (distanceChange > 15) {
-        // 遠了：目標在背後
-        targetAbsoluteBearing = (startHeading + 180) % 360;
-      } else {
-        // 距離變化不大：目標可能在左側或右側 (預設側邊 90 度)
-        targetAbsoluteBearing = (startHeading + 90) % 360;
+      osc.start();
+      gain.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.12);
+      osc.stop(audioCtx.currentTime + 0.12);
+    }
+
+    function triggerSearchSound() {
+      let count = 0;
+      const interval = setInterval(() => {
+        playBeepSound();
+        count++;
+        if (count >= 8) clearInterval(interval);
+      }, 200);
+    }
+
+    // --- 1. Web Bluetooth 連線與訊號 (RSSI) 監測 ---
+    async function connectBluetooth() {
+      try {
+        updateStatus("搜尋藍芽裝置中...");
+        bleDevice = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: ['generic_access']
+        });
+
+        bleServer = await bleDevice.gatt.connect();
+        updateStatus("✅ 藍芽連線成功！正在監控訊號強度...");
+
+        // 啟動 RSSI 訊號檢測 loop
+        startRSSIMonitor();
+      } catch (error) {
+        updateStatus("❌ 藍芽連線失敗：" + error.message);
+      }
+    }
+
+    function startRSSIMonitor() {
+      setInterval(async () => {
+        if (bleServer && bleServer.connected) {
+          try {
+            // 讀取訊號強度 (部分瀏覽器支援 getRSSI)
+            if (bleDevice.watchAdvertisements) {
+              await bleDevice.watchAdvertisements();
+            }
+          } catch (e) {
+            console.log("RSSI 讀取限制:", e);
+          }
+        }
+      }, 2000);
+
+      // 自動逼逼聲邏輯：當 RSSI 訊號大於 -70dBm (距離很近時) 自動觸發
+      setInterval(() => {
+        if (currentRSSI > -70) {
+          playBeepSound();
+        }
+      }, 1000);
+    }
+
+    // --- 2. GPS 定位與指南針角度運算 ---
+    function startGPSTracking() {
+      // 請求 iOS 指南針權限
+      if (window.DeviceOrientationEvent) {
+        if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+          DeviceOrientationEvent.requestPermission().then(res => {
+            if (res === 'granted') {
+              window.addEventListener('deviceorientation', handleOrientation, true);
+            }
+          });
+        } else {
+          window.addEventListener('deviceorientation', handleOrientation, true);
+        }
       }
 
-      isCalibrated = true;
-      document.getElementById('guideText').innerText = '✅ 校正完成！真實方位已定位。';
-      document.getElementById('bearingVal').innerText = `${Math.round(targetAbsoluteBearing)}°`;
-      document.getElementById('recalBtn').style.display = 'inline-block';
-    }, 3500);
-  }
-
-  // 4. 按鈕觸發與藍牙連線
-  document.getElementById('startBtn').addEventListener('click', async () => {
-    // 請求指南針權限
-    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-      await DeviceOrientationEvent.requestPermission();
+      // 啟動手機 GPS 監聽
+      if ("geolocation" in navigator) {
+        navigator.geolocation.watchPosition(
+          (pos) => {
+            userLat = pos.coords.latitude;
+            userLng = pos.coords.longitude;
+            updateRadarDisplay();
+          },
+          (err) => updateStatus("GPS 失敗：" + err.message),
+          { enableHighAccuracy: true, maximumAge: 0, timeout: 5000 }
+        );
+      }
     }
-    window.addEventListener('deviceorientation', handleOrientation, true);
 
-    try {
-      const device = await navigator.bluetooth.requestDevice({
-        acceptAllDevices: true,
-        optionalServices: ['battery_service']
-      });
-
-      isConnected = true;
-      document.getElementById('statusText').innerText = `已連線至：${device.name || '藍牙裝置'}`;
-
-      // 模擬藍牙 RSSI 即時讀取與距離換算
-      setInterval(() => {
-        // 模擬訊號 RSSI（實際使用時填入真實 BLE 讀取數據）
-        let mockRssi = -50 - Math.floor(Math.random() * 10);
-        currentDistanceCm = Math.max(30, Math.round(Math.pow(10, (-59 - mockRssi) / (10 * 2)) * 100));
-        
-        document.getElementById('distVal').innerText = currentDistanceCm;
-      }, 800);
-
-      // 開始走動校正
-      startCalibration();
-
-    } catch (err) {
-      console.log('藍牙連線失敗:', err);
+    function handleOrientation(event) {
+      if (event.webkitCompassHeading) {
+        userHeading = event.webkitCompassHeading; // iOS 專用磁北角
+      } else if (event.alpha) {
+        userHeading = 360 - event.alpha;
+      }
+      updateRadarDisplay();
     }
-  });
 
-  document.getElementById('recalBtn').addEventListener('click', () => {
-    startCalibration();
-  });
+    // 經緯度極座標轉相對方位角與距離
+    function updateRadarDisplay() {
+      const targetLat = parseFloat(document.getElementById('targetLat').value);
+      const targetLng = parseFloat(document.getElementById('targetLng').value);
 
-  drawRadar();
-</script>
+      if (!targetLat || !targetLng || userLat === 0) return;
+
+      const R = 6371e3; // 地球半徑 (公尺)
+      const φ1 = userLat * Math.PI / 180;
+      const φ2 = targetLat * Math.PI / 180;
+      const Δφ = (targetLat - userLat) * Math.PI / 180;
+      const Δλ = (targetLng - userLng) * Math.PI / 180;
+
+      const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+                Math.cos(φ1) * Math.cos(φ2) * Math.sin(Δλ/2) * Math.sin(Δλ/2);
+      const distance = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+      const y = Math.sin(Δλ) * Math.cos(φ2);
+      const x = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+      let bearing = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+
+      // 算出來的角度：相對於手機朝向的正前方 (0 度為正上方)
+      let relativeAngle = (bearing - userHeading + 360) % 360;
+
+      updateStatus(`距離龍珠：${distance.toFixed(1)} 公尺\n相對角度：${relativeAngle.toFixed(0)}°`);
+      drawRadar(relativeAngle, distance);
+    }
+
+    // --- 3. 雷達畫布 (Canvas) 繪製 ---
+    function drawRadar(angle, distance) {
+      const canvas = document.getElementById('radarCanvas');
+      const ctx = canvas.getContext('2d');
+      const cx = canvas.width / 2;
+      const cy = canvas.height / 2;
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // 雷達綠色同心圓網格
+      ctx.strokeStyle = '#00ff00';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(cx, cy, 40, 0, Math.PI * 2);
+      ctx.arc(cx, cy, 80, 0, Math.PI * 2);
+      ctx.arc(cx, cy, 120, 0, Math.PI * 2);
+      ctx.moveTo(cx, 0); ctx.lineTo(cx, canvas.height);
+      ctx.moveTo(0, cy); ctx.lineTo(canvas.width, cy);
+      ctx.stroke();
+
+      // 極座標轉直角座標
+      const rad = (angle - 90) * Math.PI / 180;
+      const maxDisplayDist = 50; // 最外圈代表 50 公尺
+      const drawDist = Math.min(distance, maxDisplayDist) * (120 / maxDisplayDist);
+
+      const px = cx + drawDist * Math.cos(rad);
+      const py = cy + drawDist * Math.sin(rad);
+
+      // 繪製紅黃閃爍龍珠光點
+      ctx.fillStyle = '#ff3300';
+      ctx.beginPath();
+      ctx.arc(px, py, 7, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function updateStatus(msg) {
+      document.getElementById('status').innerText = msg;
+    }
+  </script>
 </body>
 </html>
